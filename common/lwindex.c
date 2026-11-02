@@ -1062,6 +1062,60 @@ static int make_vc1_ebdu(lwindex_helper_t* helper, AVPacket* in_pkt, AVPacket* o
     return av_packet_ref(out_pkt, &helper->pkt);
 }
 
+static int h264_split(const uint8_t* buf, int buf_size)
+{
+    uint32_t state = -1;
+    int has_sps = 0;
+    int has_pps = 0;
+
+    for (int i = 0; i < buf_size; i++) {
+        state = (state << 8) | buf[i];
+        if ((state & 0xFFFFFF00) != 0x100)
+            continue;
+        int type = state & 0x1F;
+        if (type == 7)
+            has_sps = 1;
+        else if (type == 8)
+            has_pps = 1;
+        else if ((type != 6 || has_pps) && type != 9 && type != 13 &&
+                 type != 15 && has_sps) {
+            int offset = i - 3;
+            while (offset > 0 && buf[offset - 1] == 0)
+                offset--;
+            return offset;
+        }
+    }
+    return 0;
+}
+
+static int hevc_split(const uint8_t* buf, int buf_size)
+{
+    uint32_t state = -1;
+    int has_vps = 0;
+    int has_sps = 0;
+    int has_pps = 0;
+
+    for (int i = 0; i < buf_size; i++) {
+        state = (state << 8) | buf[i];
+        if ((state >> 8) != 0x000001)
+            continue;
+        int type = (state >> 1) & 0x3F;
+        if (type == 32)
+            has_vps = 1;
+        else if (type == 33)
+            has_sps = 1;
+        else if (type == 34)
+            has_pps = 1;
+        else if ((type != 39 || has_pps) && type != 35 && has_vps && has_sps) {
+            int offset = i - 3;
+            while (offset > 0 && buf[offset - 1] == 0)
+                offset--;
+            return offset;
+        }
+    }
+    return 0;
+}
+
 static lwindex_helper_t* get_index_helper(lwindex_indexer_t* indexer, AVStream* stream, const int rap_verification)
 {
     if (indexer->number_of_helpers <= stream->index) {
@@ -1107,8 +1161,8 @@ static lwindex_helper_t* get_index_helper(lwindex_indexer_t* indexer, AVStream* 
             if (codecpar->codec_id == AV_CODEC_ID_H264
                 && codecpar->extradata_size >= 8 /* 8 is the offset of the first byte of the first SPS in AVCConfigurationRecord. */
                 && codecpar->extradata[0] == 1 /* configurationVersion == 1 */
-                && helper->parser_ctx->parser && helper->parser_ctx->parser->split
-                && helper->parser_ctx->parser->split(helper->codec_ctx, codecpar->extradata + 8, codecpar->extradata_size - 8) <= 0) {
+                && helper->parser_ctx->parser
+                && h264_split(codecpar->extradata + 8, codecpar->extradata_size - 8) <= 0) {
                 /* Since a SPS shall have no start code and no its emulation,
                  * therefore, this stream is not encapsulated as byte stream format. */
                 helper->bsf = av_bsf_get_by_name("h264_mp4toannexb");
@@ -1288,12 +1342,14 @@ static int append_extradata_if_new(lwindex_helper_t* helper, AVCodecContext* ctx
     if (current.extradata == ctx->extradata) {
         AVCodecParserContext* parser_ctx = helper->parser_ctx;
         if (parser_ctx && parser_ctx->parser) {
-            if (parser_ctx->parser->split) {
+            if (ctx->codec_id == AV_CODEC_ID_H264 || ctx->codec_id == AV_CODEC_ID_HEVC) {
                 /* For H.264 stream without start codes, don't split extradata from pkt->data.
                  * Its extradata is stored as global header. so, pkt->data shall contain no extradata.
                  * Libavcodec may not remove meaningless data which precedes data actually needed for decoding,
                  * so get the offset to such significant data here to deduplicate extradata as much as possible. */
-                int extradata_size = helper->bsf ? 0 : parser_ctx->parser->split(ctx, pkt->data, pkt->size);
+                int extradata_size = helper->bsf ? 0 : ctx->codec_id == AV_CODEC_ID_H264
+                    ? h264_split(pkt->data, pkt->size)
+                    : hevc_split(pkt->data, pkt->size);
                 if (extradata_size > 0) {
                     int offset = get_offset_to_significant_extradata(ctx, pkt);
                     current.extradata = pkt->data + (uintptr_t)offset;
