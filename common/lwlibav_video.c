@@ -1147,10 +1147,20 @@ static uint32_t lwlibav_vfr2cfr(lwlibav_video_decode_handler_t* vdhp, lwlibav_vi
 static void handle_decoder_pix_fmt(AVCodecParameters* codecpar, const AVCodec* codec, enum AVPixelFormat pix_fmt)
 {
     assert(codecpar && codec);
-    if (codec->pix_fmts)
+#if LIBAVCODEC_VERSION_INT >= AV_VERSION_INT(61, 13, 100)
+    const void* configs = NULL;
+    if (avcodec_get_supported_config(NULL, codec, AV_CODEC_CONFIG_PIX_FORMAT, 0, &configs, NULL) >= 0
+        && configs) {
+        codecpar->format = (int)avcodec_find_best_pix_fmt_of_list(configs, pix_fmt, 1, NULL);
+        return;
+    }
+#else
+    if (codec->pix_fmts) {
         codecpar->format = (int)avcodec_find_best_pix_fmt_of_list(codec->pix_fmts, pix_fmt, 1, NULL);
-    else
-        codecpar->format = (int)pix_fmt;
+        return;
+    }
+#endif
+    codecpar->format = (int)pix_fmt;
 }
 
 static int get_video_frame(lwlibav_video_decode_handler_t* vdhp, lwlibav_video_output_handler_t* vohp, uint32_t frame_number)
